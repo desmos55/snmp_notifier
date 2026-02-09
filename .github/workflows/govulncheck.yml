@@ -4,6 +4,16 @@ name: Govulncheck
 on:
   pull_request:
   push:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Which govulncheck job to run"
+        required: true
+        default: "source"
+        type: choice
+        options:
+          - source
+          - container
   # Run every Monday at 3:00 AM UTC
   schedule:
     - cron: '0 3 * * 1'
@@ -21,6 +31,7 @@ jobs:
     if: |
       github.event_name == 'push' ||
       github.event_name == 'pull_request' ||
+      (github.event_name == 'workflow_dispatch' && inputs.mode == 'source')
     runs-on: ubuntu-latest
     container:
       image: quay.io/prometheus/golang-builder:1.24-base
@@ -32,6 +43,7 @@ jobs:
     name: govulncheck (latest container)
     if: |
       github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && inputs.mode == 'container')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository (for scheduled run)
