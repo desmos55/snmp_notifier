@@ -18,9 +18,73 @@ permissions:
 jobs:
   govulncheck:
     name: govulncheck
+    if: |
+      github.event_name == 'push' ||
+      github.event_name == 'pull_request' ||
     runs-on: ubuntu-latest
     container:
       image: quay.io/prometheus/golang-builder:1.24-base
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
       - run: make govulncheck
+
+  govulncheck_latest_container:
+    name: govulncheck (latest container)
+    if: |
+      github.event_name == 'schedule' ||
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository (for scheduled run)
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Determine latest release tag
+        id: release
+        run: |
+          set -eu
+          tag="$(git tag --list 'v*' --sort=-v:refname | head -n 1 || true)"
+          if [ -z "$tag" ]; then
+            echo "No release tags found; cannot determine released image tag."
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout latest release tag
+        run: git checkout "${{ steps.release.outputs.tag }}"
+
+      - name: Determine Go version (from release)
+        id: go
+        run: |
+          set -eu
+          toolchain="$(awk '$1=="toolchain" {print $2}' go.mod | head -n 1 || true)"
+          if [ -n "$toolchain" ]; then
+            echo "version=${toolchain#go}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          gov="$(awk '$1=="go" {print $2}' go.mod | head -n 1)"
+          echo "version=$gov" >> "$GITHUB_OUTPUT"
+
+      - name: Install Go
+        uses: actions/setup-go@0aaccfd150d50ccaeb58ebd88d36e91967a5f35b # v5.4.0
+        with:
+          go-version: ${{ steps.go.outputs.version }}
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Pull released image and extract binary
+        env:
+          IMAGE: maxwo/snmp-notifier:${{ steps.release.outputs.tag }}
+        run: |
+          set -eu
+          docker pull "$IMAGE"
+          cid="$(docker create "$IMAGE")"
+          docker cp "$cid:/bin/snmp_notifier" ./snmp_notifier
+          docker rm "$cid"
+
+      - name: Run govulncheck (binary mode)
+        run: |
+          set -eu
+          "$(go env GOPATH)/bin/govulncheck" -mode=binary ./snmp_notifier
