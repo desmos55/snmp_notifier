@@ -1,0 +1,120 @@
+---
+name: Govulncheck (Container)
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_repo_mode:
+        description: "Docker image repository"
+        required: true
+        default: "upstream"
+        type: choice
+        options:
+          - upstream
+          - this_fork
+          - custom
+      image_repo_custom:
+        description: "Custom Docker image repository (owner/name), used only when image_repo_mode=custom"
+        required: false
+        default: ""
+        type: string
+      image_tag_mode:
+        description: "Docker image tag"
+        required: true
+        default: "latest"
+        type: choice
+        options:
+          - latest
+          - custom
+      image_tag_custom:
+        description: "Custom Docker image tag (e.g. v2.1.0), used only when image_tag_mode=custom"
+        required: false
+        default: ""
+        type: string
+  # Run every Monday at 3:00 AM UTC
+  schedule:
+    - cron: '0 3 * * 1'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck_latest_container:
+    name: govulncheck (released container)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine image repo and tag
+        id: release
+        run: |
+          set -eu
+          image_repo_mode="${{ inputs.image_repo_mode }}"
+          image_repo_custom="${{ inputs.image_repo_custom }}"
+          if [ "$image_repo_mode" = "upstream" ]; then
+            image_repo="maxwo/snmp-notifier"
+          elif [ "$image_repo_mode" = "this_fork" ]; then
+            image_repo="${{ github.repository_owner }}/snmp-notifier"
+          elif [ "$image_repo_mode" = "custom" ]; then
+            if [ -z "$image_repo_custom" ]; then
+              echo "image_repo_custom is required when image_repo_mode=custom"
+              exit 1
+            fi
+            echo "$image_repo_custom" | grep -Eq '^[a-z0-9]+([._-][a-z0-9]+)*/[a-z0-9]+([._-][a-z0-9]+)*$'
+            image_repo="$image_repo_custom"
+          else
+            echo "Unexpected image_repo_mode: $image_repo_mode"
+            exit 1
+          fi
+
+          namespace="${image_repo%%/*}"
+          repo="${image_repo#*/}"
+
+          tag_mode="${{ inputs.image_tag_mode }}"
+          tag_custom="${{ inputs.image_tag_custom }}"
+          if [ "$tag_mode" = "custom" ]; then
+            if [ -z "$tag_custom" ]; then
+              echo "image_tag_custom is required when image_tag_mode=custom"
+              exit 1
+            fi
+            echo "$tag_custom" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+$'
+            tag="$tag_custom"
+          else
+            tag="$(curl -fsSL "https://hub.docker.com/v2/repositories/${namespace}/${repo}/tags?page_size=100" \
+              | jq -r '.results[].name' \
+              | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' \
+              | sort -V \
+              | tail -n 1 \
+              || true)"
+          fi
+          if [ -z "$tag" ]; then
+            echo "No suitable semver tags found on Docker Hub for ${image_repo}; set image_tag manually."
+            exit 1
+          fi
+          echo "image_repo=$image_repo" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Install Go
+        uses: actions/setup-go@0aaccfd150d50ccaeb58ebd88d36e91967a5f35b # v5.4.0
+        with:
+          go-version: 1.24.x
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Pull released image and extract binary
+        env:
+          IMAGE: ${{ steps.release.outputs.image_repo }}:${{ steps.release.outputs.tag }}
+        run: |
+          set -eu
+          docker pull "$IMAGE"
+          cid="$(docker create "$IMAGE")"
+          docker cp "$cid:/bin/snmp_notifier" ./snmp_notifier
+          docker rm "$cid"
+
+      - name: Run govulncheck (binary mode)
+        run: |
+          set -eu
+          "$(go env GOPATH)/bin/govulncheck" -mode=binary ./snmp_notifier
